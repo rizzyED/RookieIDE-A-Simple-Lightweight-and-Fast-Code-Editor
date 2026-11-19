@@ -1,5 +1,6 @@
 data/org.gnome.RookieIDE.desktop.in
 data/org.gnome.RookieIDE.metainfo.xml.in
+data/org.gnome.RookieIDE.metainfo.xml
 data/org.gnome.RookieIDE.gschema.xml
 src/main.vala
 src/window.vala

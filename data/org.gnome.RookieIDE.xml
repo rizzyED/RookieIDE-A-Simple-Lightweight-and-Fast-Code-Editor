@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.rookieide.App</id>
+  <id>org.gnome.RookieIDE</id>
   <name>RookieIDE</name>
   <summary>Lightweight GTK4 and Libadwaita code editor and IDE</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -13,7 +13,7 @@
       bracket autoclose, and snippet autofill.
     </p>
   </description>
-  <launchable type="desktop-id">io.github.rookieide.App.desktop</launchable>
+  <launchable type="desktop-id">org.gnome.RookieIDE</launchable>
   <provides>
     <binary>rookieide</binary>
   </provides>

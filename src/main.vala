@@ -290,7 +290,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     public RookieIdeWindow (Adw.Application app) {
         Object (
             application: app,
-            icon_name: "io.github.rookieide.App",
+            icon_name: "org.gnome.RookieIDE",
             default_width: 1200,
             default_height: 780
         );
@@ -656,9 +656,15 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             .fm-sidebar {
                 background-color: alpha(@view_bg_color, 0.55);
             }
+            .tabbar tab {
+                min-width: 0;
+                min-height: 0;
+            }
             .tabbar tab.uncompiled-glow,
             .tabbar tab.uncompiled-glow label,
             label.uncompiled-glow {
+                min-width: 0;
+                min-height: 0;
                 color: #ff4d5a;
                 text-shadow: 0 0 6px rgba(255, 59, 78, 0.9), 0 0 14px rgba(224, 27, 36, 0.65);
                 font-weight: 700;
@@ -726,7 +732,6 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         }
         if (!initial_layout_applied && editor_paned != null) {
             int h = get_effective_height ();
-            /* Keep bottom panel compact (~22% height) so editor & sidebar remain balanced */
             editor_paned.set_position (((int) (h * 0.78)).clamp (260, int.max (320, h - 130)));
             initial_layout_applied = true;
         }
@@ -3233,7 +3238,6 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         entries_row.append (new Gtk.Label ("Run:"));
         entries_row.append (run_entry);
 
-        /* Top-level horizontal paned: Full-height Sidebar on left, Editor+Bottom Dock on right */
         main_paned = new Gtk.Paned (Gtk.Orientation.HORIZONTAL);
         main_paned.set_vexpand (true);
         main_paned.set_hexpand (true);
@@ -3250,7 +3254,6 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         main_paned.set_resize_start_child (false);
         main_paned.set_shrink_start_child (false);
 
-        /* Right column vertical paned: Editor on top, Status/Compiler/Terminal underneath */
         editor_paned = new Gtk.Paned (Gtk.Orientation.VERTICAL);
         editor_paned.set_vexpand (true);
         editor_paned.set_hexpand (true);
@@ -3306,7 +3309,6 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             }
         });
 
-        /* Right-hand bottom dock: horizontal tab strip above stack view */
         var bottom_dock = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
         bottom_dock.set_size_request (-1, 110);
         bottom_dock.set_vexpand (true);
@@ -3968,7 +3970,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 public class RookieIdeApp : Adw.Application {
     public RookieIdeApp () {
         Object (
-            application_id: "io.github.rookieide.App",
+            application_id: "org.gnome.RookieIDE",
             flags: ApplicationFlags.DEFAULT_FLAGS
         );
     }
@@ -3985,7 +3987,7 @@ public class RookieIdeApp : Adw.Application {
 
     public static int main (string[] args) {
         GLib.Environment.set_application_name ("RookieIDE");
-        GLib.Environment.set_prgname ("io.github.rookieide.App");
+        GLib.Environment.set_prgname ("org.gnome.RookieIDE");
         GtkSource.init ();
         var app = new RookieIdeApp ();
         int status = app.run (args);
