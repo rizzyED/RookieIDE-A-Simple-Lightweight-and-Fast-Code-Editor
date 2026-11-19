@@ -50,3 +50,4 @@ Or install it onto your system:
 ```bash
 sudo ninja -C _build install
 ```
+Also available with AppImage. Windows Platform port? maybe next month lol
