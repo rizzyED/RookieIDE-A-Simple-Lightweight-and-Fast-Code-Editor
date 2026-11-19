@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.rookieide.App</id>
+  <name>RookieIDE</name>
+  <summary>Lightweight GTK4 and Libadwaita code editor and IDE</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>
+      RookieIDE is a lightweight desktop code editor built with GTK 4, Libadwaita,
+      GtkSourceView 5, and VTE. It features multi-tab editing, a file manager
+      sidebar, per-language Compile, Make, and Run commands, theme profiles,
+      bracket autoclose, and snippet autofill.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.rookieide.App.desktop</launchable>
+  <provides>
+    <binary>rookieide</binary>
+  </provides>
+  <releases>
+    <release version="1.0.0" date="2026-11-19">
+      <description>
+        <p>Initial release with bracket autoclose, snippet autofill, theme profiles, and AppImage support.</p>
+      </description>
+    </release>
+  </releases>
+</component>

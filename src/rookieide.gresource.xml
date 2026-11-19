@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/rookieide/App">
+    <file alias="icons/hicolor/scalable/apps/io.github.rookieide.App.svg">../data/icons/hicolor/scalable/apps/io.github.rookieide.App.svg</file>
+  </gresource>
+</gresources>

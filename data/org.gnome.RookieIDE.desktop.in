@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=RookieIDE
+Comment=Lightweight GTK4 and Libadwaita code editor and IDE
+Exec=rookieide %F
+Icon=io.github.rookieide.App
+Terminal=false
+Type=Application
+Categories=Development;IDE;
+StartupNotify=true
+StartupWMClass=io.github.rookieide.App
