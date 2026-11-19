@@ -30,12 +30,14 @@ private class EditorTabData : GLib.Object {
     public GtkSource.Buffer buffer;
     public GtkSource.View view;
     public bool dirty;
+    public bool needs_compile;
 
     public EditorTabData (GLib.File? file, GtkSource.Buffer buffer, GtkSource.View view) {
         this.file = file;
         this.buffer = buffer;
         this.view = view;
         this.dirty = false;
+        this.needs_compile = false;
     }
 }
 
@@ -83,14 +85,91 @@ private struct LanguageFormat {
     public string base_template;
 }
 
+private class ErrorLineSourceView : GtkSource.View {
+    public ErrorLineSourceView.with_buffer (GtkSource.Buffer buffer) {
+        Object (buffer: buffer);
+    }
+
+    public override void snapshot_layer (Gtk.TextViewLayer layer, Gtk.Snapshot snapshot) {
+        if (layer == Gtk.TextViewLayer.BELOW_TEXT) {
+            var buf = this.get_buffer () as Gtk.TextBuffer;
+            if (buf != null) {
+                var tag = buf.get_tag_table ().lookup ("editor-error-line");
+                if (tag != null) {
+                    Gdk.Rectangle visible_rect;
+                    this.get_visible_rect (out visible_rect);
+
+                    Gtk.TextIter start_iter, end_iter;
+                    this.get_line_at_y (out start_iter, visible_rect.y, null);
+                    this.get_line_at_y (out end_iter, visible_rect.y + visible_rect.height, null);
+
+                    int first_line = start_iter.get_line ();
+                    int last_line = end_iter.get_line ();
+                    int view_width = this.get_width ();
+
+                    var band_color = Gdk.RGBA ();
+                    band_color.parse ("#5c161c");
+
+                    for (int line_num = first_line; line_num <= last_line; line_num++) {
+                        Gtk.TextIter l_start, l_end;
+                        buf.get_iter_at_line (out l_start, line_num);
+                        l_end = l_start;
+                        if (!l_end.ends_line ()) {
+                            l_end.forward_to_line_end ();
+                        }
+
+                        bool line_has_tag = l_start.has_tag (tag) || l_start.starts_tag (tag);
+                        if (!line_has_tag) {
+                            Gtk.TextIter probe = l_start;
+                            while (probe.compare (l_end) < 0) {
+                                if (probe.has_tag (tag)) {
+                                    line_has_tag = true;
+                                    break;
+                                }
+                                if (!probe.forward_char ()) {
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!line_has_tag) {
+                            continue;
+                        }
+
+                        int y, height;
+                        this.get_line_yrange (l_start, out y, out height);
+
+                        int win_x, win_y;
+                        this.buffer_to_window_coords (
+                            Gtk.TextWindowType.WIDGET,
+                            0,
+                            y,
+                            out win_x,
+                            out win_y
+                        );
+
+                        var rect = Graphene.Rect () {
+                            origin = { 0.0f, (float) win_y },
+                            size = { (float) view_width, (float) height }
+                        };
+                        snapshot.append_color (band_color, rect);
+                    }
+                }
+            }
+        }
+
+        base.snapshot_layer (layer, snapshot);
+    }
+}
+
 public class RookieIdeWindow : Adw.ApplicationWindow {
     private Adw.TabView tab_view;
     private Adw.TabBar tab_bar;
     private Vte.Terminal terminal;
     private Adw.WindowTitle title_widget;
 
-    private Gtk.Paned main_paned;
-    private Gtk.Paned sidebar_paned;
+    private Gtk.Paned main_paned;     // Horizontal: Full-height Sidebar | Right Workspace
+    private Gtk.Paned editor_paned;   // Vertical: Editor (top) | Status/Compiler/Terminal (bottom)
     private Gtk.Box file_sidebar;
     private Gtk.Label fm_dir_label;
     private Gtk.ListBox fm_list_box;
@@ -133,6 +212,8 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     private bool syncing_entries = false;
     private bool syncing_title = false;
     private bool restoring_session = false;
+    private bool closing_tab = false;
+    private bool force_closing_window = false;
 
     private uint save_session_timeout_id = 0;
     private uint save_cmds_timeout_id = 0;
@@ -244,6 +325,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         this.map.connect (() => {
             Idle.add (() => {
                 apply_startup_splits (true);
+                sync_all_tab_glows ();
                 return Source.REMOVE;
             });
         });
@@ -251,19 +333,288 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         append_status ("RookieIDE ready (Profile: %s).".printf (active_profile_name));
 
         this.close_request.connect (() => {
-            if (apply_profile_idle_id != 0) {
-                Source.remove (apply_profile_idle_id);
-                apply_profile_idle_id = 0;
+            if (!force_closing_window && has_any_dirty_tab ()) {
+                prompt_close_window_with_dirty_tabs ();
+                return true;
             }
-            if (token_popover != null) {
-                token_popover.unparent ();
-                token_popover = null;
-                token_list_box = null;
-            }
-            flush_pending_saves ();
-            clear_log_buffers ();
+            cleanup_and_exit ();
             return false;
         });
+    }
+
+    private void cleanup_and_exit () {
+        if (apply_profile_idle_id != 0) {
+            Source.remove (apply_profile_idle_id);
+            apply_profile_idle_id = 0;
+        }
+        if (token_popover != null) {
+            token_popover.unparent ();
+            token_popover = null;
+            token_list_box = null;
+        }
+        flush_pending_saves ();
+        clear_log_buffers ();
+    }
+
+    /* =========================================================================
+     * Glowing Red Uncompiled Tab Indicator
+     * ========================================================================= */
+    private void apply_glow_to_matching_widgets (Gtk.Widget root, string clean_title, bool glowing) {
+        if (root is Gtk.Label) {
+            var lbl = (Gtk.Label) root;
+            string lbl_clean = lbl.get_label ().replace ("*", "").strip ();
+            if (lbl_clean == clean_title) {
+                if (glowing) {
+                    lbl.add_css_class ("uncompiled-glow");
+                } else {
+                    lbl.remove_css_class ("uncompiled-glow");
+                }
+            }
+        }
+
+        var child = root.get_first_child ();
+        while (child != null) {
+            var next = child.get_next_sibling ();
+            apply_glow_to_matching_widgets (child, clean_title, glowing);
+            child = next;
+        }
+    }
+
+    private void set_tab_uncompiled_glow (Adw.TabPage? page, EditorTabData? data, bool glowing) {
+        if (data == null) {
+            return;
+        }
+        data.needs_compile = glowing;
+
+        if (page != null && tab_bar != null) {
+            string clean_title = page.get_title ().replace ("*", "").strip ();
+            if (clean_title != "") {
+                apply_glow_to_matching_widgets (tab_bar, clean_title, glowing);
+                tab_bar.queue_draw ();
+            }
+        }
+    }
+
+    private void sync_all_tab_glows () {
+        if (tab_view == null || tab_bar == null) {
+            return;
+        }
+        int n = tab_view.get_n_pages ();
+        for (int i = 0; i < n; i++) {
+            Adw.TabPage? page;
+            var data = get_tab_data_at (i, out page);
+            if (data != null && page != null) {
+                string clean_title = page.get_title ().replace ("*", "").strip ();
+                if (clean_title != "") {
+                    apply_glow_to_matching_widgets (tab_bar, clean_title, data.needs_compile);
+                }
+            }
+        }
+        tab_bar.queue_draw ();
+    }
+
+    private void clear_uncompiled_glow_for_target (string dir, string filename) {
+        string target_path = Path.build_filename (dir, filename);
+        int n = tab_view.get_n_pages ();
+        for (int i = 0; i < n; i++) {
+            Adw.TabPage? page;
+            var data = get_tab_data_at (i, out page);
+            if (data == null || page == null) {
+                continue;
+            }
+            string? tab_path = data.file != null ? data.file.get_path () : null;
+            bool matches = (tab_path != null && tab_path == target_path) ||
+                           (data.file == null && page == tab_view.get_selected_page ());
+            if (matches) {
+                set_tab_uncompiled_glow (page, data, false);
+            }
+        }
+    }
+
+    /* =========================================================================
+     * Save / Discard / Cancel Prompts Before Closing Tabs or Window
+     * ========================================================================= */
+    private bool has_any_dirty_tab () {
+        if (tab_view == null) {
+            return false;
+        }
+        int n = tab_view.get_n_pages ();
+        for (int i = 0; i < n; i++) {
+            Adw.TabPage? _p;
+            var data = get_tab_data_at (i, out _p);
+            if (data != null && data.dirty) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void finalize_tab_close (Adw.TabPage page, EditorTabData? data) {
+        closing_tab = true;
+        if (data != null) {
+            detach_token_popover_if_parent (data.view);
+        }
+        tab_view.close_page_finish (page, true);
+        if (tab_view.get_n_pages () == 0) {
+            create_new_tab (null, "Untitled", "");
+        }
+        closing_tab = false;
+        refresh_active_tab_state ();
+        sync_all_tab_glows ();
+        schedule_save_session ();
+    }
+
+    private void prompt_close_dirty_page (Adw.TabPage page, EditorTabData data) {
+        string raw_title = page.get_title ().replace ("*", "").strip ();
+        if (raw_title == "") {
+            raw_title = "Untitled";
+        }
+
+        var dialog = new Adw.AlertDialog (
+            "Save Changes to \"%s\"?".printf (raw_title),
+            "Your changes will be permanently lost if you don't save them before closing."
+        );
+        dialog.add_response ("cancel", "Cancel");
+        dialog.add_response ("discard", "Discard");
+        dialog.add_response ("save", "Save");
+        dialog.set_response_appearance ("discard", Adw.ResponseAppearance.DESTRUCTIVE);
+        dialog.set_response_appearance ("save", Adw.ResponseAppearance.SUGGESTED);
+        dialog.set_default_response ("save");
+        dialog.set_close_response ("cancel");
+
+        dialog.response.connect ((resp) => {
+            if (resp == "discard") {
+                data.dirty = false;
+                data.needs_compile = false;
+                finalize_tab_close (page, data);
+                return;
+            }
+
+            if (resp == "save") {
+                if (data.file != null) {
+                    if (write_tab_to_disk (page, data, false)) {
+                        finalize_tab_close (page, data);
+                    } else {
+                        tab_view.close_page_finish (page, false);
+                    }
+                    return;
+                }
+
+                var save_dialog = new Gtk.FileDialog ();
+                save_dialog.set_initial_name (raw_title);
+                save_dialog.save.begin (this, null, (_obj, res) => {
+                    try {
+                        GLib.File? chosen = save_dialog.save.end (res);
+                        if (chosen != null) {
+                            data.file = chosen;
+                            if (write_tab_to_disk (page, data, false)) {
+                                finalize_tab_close (page, data);
+                                return;
+                            }
+                        }
+                    } catch (Error e) {
+                        if (!(e is Gtk.DialogError.DISMISSED)) {
+                            append_status ("Save error: %s".printf (e.message));
+                            show_status_dialog ("Save Error", e.message);
+                        }
+                    }
+                    tab_view.close_page_finish (page, false);
+                });
+                return;
+            }
+
+            tab_view.close_page_finish (page, false);
+        });
+
+        dialog.present (this);
+    }
+
+    private void save_next_dirty_or_close_window (int start_index) {
+        int n = tab_view.get_n_pages ();
+        for (int i = start_index; i < n; i++) {
+            Adw.TabPage? page;
+            var data = get_tab_data_at (i, out page);
+            if (data != null && page != null && data.dirty) {
+                if (data.file != null) {
+                    if (!write_tab_to_disk (page, data, false)) {
+                        return;
+                    }
+                } else {
+                    tab_view.set_selected_page (page);
+                    string raw_title = page.get_title ().replace ("*", "").strip ();
+                    if (raw_title == "") {
+                        raw_title = "Untitled";
+                    }
+
+                    var save_dialog = new Gtk.FileDialog ();
+                    save_dialog.set_initial_name (raw_title);
+                    save_dialog.save.begin (this, null, (_obj, res) => {
+                        try {
+                            GLib.File? chosen = save_dialog.save.end (res);
+                            if (chosen != null) {
+                                data.file = chosen;
+                                if (write_tab_to_disk (page, data, false)) {
+                                    save_next_dirty_or_close_window (i + 1);
+                                }
+                            }
+                        } catch (Error e) {
+                            if (!(e is Gtk.DialogError.DISMISSED)) {
+                                append_status ("Save error: %s".printf (e.message));
+                                show_status_dialog ("Save Error", e.message);
+                            }
+                        }
+                    });
+                    return;
+                }
+            }
+        }
+
+        force_closing_window = true;
+        this.close ();
+    }
+
+    private void prompt_close_window_with_dirty_tabs () {
+        var dirty_names = new GenericArray<string> ();
+        int n = tab_view.get_n_pages ();
+        for (int i = 0; i < n; i++) {
+            Adw.TabPage? page;
+            var data = get_tab_data_at (i, out page);
+            if (data != null && page != null && data.dirty) {
+                string clean = page.get_title ().replace ("*", "").strip ();
+                dirty_names.add (clean != "" ? clean : "Untitled");
+            }
+        }
+
+        string body;
+        if (dirty_names.length == 1) {
+            body = "\"%s\" has unsaved changes. Do you want to save before leaving?".printf (dirty_names[0]);
+        } else {
+            var list_sb = new StringBuilder ();
+            for (int i = 0; i < dirty_names.length; i++) {
+                list_sb.append_printf ("\n• %s", dirty_names[i]);
+            }
+            body = "The following files have unsaved changes:%s".printf (list_sb.str);
+        }
+
+        var dialog = new Adw.AlertDialog ("Save Changes Before Leaving?", body);
+        dialog.add_response ("cancel", "Cancel");
+        dialog.add_response ("discard", "Discard");
+        dialog.add_response ("save", "Save");
+        dialog.set_response_appearance ("discard", Adw.ResponseAppearance.DESTRUCTIVE);
+        dialog.set_response_appearance ("save", Adw.ResponseAppearance.SUGGESTED);
+        dialog.set_default_response ("save");
+        dialog.set_close_response ("cancel");
+
+        dialog.response.connect ((resp) => {
+            if (resp == "discard") {
+                force_closing_window = true;
+                this.close ();
+            } else if (resp == "save") {
+                save_next_dirty_or_close_window (0);
+            }
+        });
+
+        dialog.present (this);
     }
 
     [CCode (cname = "gtk_style_context_add_provider_for_display")]
@@ -288,13 +639,29 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                 background-color: alpha(#e01b24, 0.14);
                 color: #ff6b72;
             }
+            .bottom-tab-strip {
+                padding: 4px 8px;
+                border-bottom: 1px solid alpha(@window_fg_color, 0.12);
+            }
+            button.bottom-tab-btn {
+                padding: 3px 10px;
+                border-radius: 6px;
+                font-weight: 500;
+            }
             button.bottom-tab-active {
-                background-color: alpha(@accent_bg_color, 0.22);
+                background-color: alpha(@accent_bg_color, 0.24);
                 color: @accent_fg_color;
                 font-weight: 600;
             }
             .fm-sidebar {
                 background-color: alpha(@view_bg_color, 0.55);
+            }
+            .tabbar tab.uncompiled-glow,
+            .tabbar tab.uncompiled-glow label,
+            label.uncompiled-glow {
+                color: #ff4d5a;
+                text-shadow: 0 0 6px rgba(255, 59, 78, 0.9), 0 0 14px rgba(224, 27, 36, 0.65);
+                font-weight: 700;
             }
         """);
 
@@ -315,12 +682,12 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         gtk_add_provider_for_display (
             display,
             vscode_theme_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2
         );
     }
 
     private int get_effective_width () {
-        int alloc_w = sidebar_paned != null ? sidebar_paned.get_width () : 0;
+        int alloc_w = main_paned != null ? main_paned.get_width () : 0;
         if (alloc_w > 0) {
             return alloc_w;
         }
@@ -329,7 +696,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     }
 
     private int get_effective_height () {
-        int alloc_h = main_paned != null ? main_paned.get_height () : 0;
+        int alloc_h = editor_paned != null ? editor_paned.get_height () : 0;
         if (alloc_h > 0) {
             return alloc_h;
         }
@@ -338,7 +705,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     }
 
     private void sync_sidebar_split_ratio (bool force = false) {
-        if (sidebar_paned == null || file_sidebar == null || !file_sidebar.get_visible ()) {
+        if (main_paned == null || file_sidebar == null || !file_sidebar.get_visible ()) {
             return;
         }
         if (user_adjusted_sidebar_split && !force) {
@@ -346,10 +713,10 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         }
 
         int w = get_effective_width ();
-        int target_pos = ((int) (w * 0.15)).clamp (120, int.max (160, w - 260));
+        int target_pos = ((int) (w * 0.20)).clamp (160, int.max (200, w - 320));
 
         syncing_sidebar_position = true;
-        sidebar_paned.set_position (target_pos);
+        main_paned.set_position (target_pos);
         syncing_sidebar_position = false;
     }
 
@@ -357,9 +724,10 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         if (file_sidebar != null && file_sidebar.get_visible ()) {
             sync_sidebar_split_ratio (force_sidebar);
         }
-        if (!initial_layout_applied && main_paned != null) {
+        if (!initial_layout_applied && editor_paned != null) {
             int h = get_effective_height ();
-            main_paned.set_position (((int) (h * 0.76)).clamp (260, int.max (320, h - 140)));
+            /* Keep bottom panel compact (~22% height) so editor & sidebar remain balanced */
+            editor_paned.set_position (((int) (h * 0.78)).clamp (260, int.max (320, h - 130)));
             initial_layout_applied = true;
         }
     }
@@ -563,28 +931,28 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                 .tabbar,
                 .fm-sidebar,
                 paned > separator {
-                    background-color: #131c28;
-                    color: #cbe2ff;
-                    border-color: #24364d;
+                    background-color: #102036;
+                    color: #d6e8ff;
+                    border-color: #243b5c;
                 }
                 .tabbar tab {
-                    background-color: #131c28;
-                    color: #8ba6c7;
+                    background-color: #102036;
+                    color: #93b3dc;
                 }
                 .tabbar tab:selected {
-                    background-color: #182536;
+                    background-color: #162a47;
                     color: #ffffff;
                     border-bottom: 2px solid #38a5ff;
                 }
                 textview.rookie-editor,
-                textview.rookie-editor text,
+                textview.rookie-editor > text,
                 textview.rookie-editor gutter {
-                    background-color: #16202e;
-                    color: #d4e6ff;
+                    background-color: #14263d;
+                    color: #d6e8ff;
                 }
                 textview {
-                    background-color: #131c28;
-                    color: #cbe2ff;
+                    background-color: #102036;
+                    color: #d6e8ff;
                 }
                 button.suggested-action {
                     background-color: #1f6feb;
@@ -597,7 +965,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                 button.bottom-tab-active {
                     background-color: alpha(#38a5ff, 0.24);
                     color: #6ec3ff;
-                    border-left: 2px solid #38a5ff;
+                    border-bottom: 2px solid #38a5ff;
                 }
             """);
             return;
@@ -624,7 +992,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                     border-bottom: 2px solid #0078d4;
                 }
                 textview.rookie-editor,
-                textview.rookie-editor text,
+                textview.rookie-editor > text,
                 textview.rookie-editor gutter {
                     background-color: #1f1f1f;
                     color: #cccccc;
@@ -643,7 +1011,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                 button.bottom-tab-active {
                     background-color: alpha(#0078d4, 0.28);
                     color: #ffffff;
-                    border-left: 2px solid #0078d4;
+                    border-bottom: 2px solid #0078d4;
                 }
             """);
             return;
@@ -674,7 +1042,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
         apply_vscode_css (prof.terminal_theme);
 
-        if (file_sidebar != null && sidebar_paned != null) {
+        if (file_sidebar != null && main_paned != null) {
             bool was_visible = file_sidebar.get_visible ();
             file_sidebar.set_visible (prof.file_manager_enabled);
             if (prof.file_manager_enabled) {
@@ -715,10 +1083,12 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                 data.view.set_tab_width ((uint) prof.tab_width.clamp (2, 8));
                 data.view.set_show_line_numbers (prof.show_line_numbers);
                 data.view.set_monospace (true);
+                data.view.queue_draw ();
             }
         }
 
         apply_terminal_profile (prof);
+        sync_all_tab_glows ();
     }
 
     private Gdk.RGBA parse_rgba (string hex) {
@@ -756,11 +1126,11 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         switch (prof.terminal_theme) {
             case "vscode-blue":
                 set_terminal_palette (
-                    "#d4e6ff",
-                    "#16202e",
+                    "#d6e8ff",
+                    "#14263d",
                     {
-                        "#131c28", "#ff6b72", "#4ec9b0", "#e5c07b",
-                        "#38a5ff", "#c586c0", "#4fc1ff", "#d4e6ff",
+                        "#102036", "#ff6b72", "#4ec9b0", "#e5c07b",
+                        "#38a5ff", "#c586c0", "#4fc1ff", "#d6e8ff",
                         "#5c7699", "#ff858d", "#6be0c8", "#f2d28b",
                         "#6ec3ff", "#d99fd6", "#7ad4ff", "#ffffff"
                     },
@@ -888,80 +1258,6 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             "background-full-height", true,
             "foreground-rgba", fg
         );
-    }
-
-    private void attach_full_line_error_painter (EditorTabData tab_data) {
-        tab_data.view.snapshot_layer.connect ((layer, snapshot) => {
-            if (layer != Gtk.TextViewLayer.BELOW_TEXT) {
-                return false;
-            }
-
-            var tag = tab_data.buffer.get_tag_table ().lookup ("editor-error-line");
-            if (tag == null) {
-                return false;
-            }
-
-            Gdk.Rectangle visible_rect;
-            tab_data.view.get_visible_rect (out visible_rect);
-
-            Gtk.TextIter start_iter, end_iter;
-            tab_data.view.get_line_at_y (out start_iter, visible_rect.y, null);
-            tab_data.view.get_line_at_y (out end_iter, visible_rect.y + visible_rect.height, null);
-
-            int first_line = start_iter.get_line ();
-            int last_line = end_iter.get_line ();
-            int view_width = tab_data.view.get_width ();
-
-            var band_color = Gdk.RGBA ();
-            band_color.parse ("#5c161c");
-
-            for (int line_num = first_line; line_num <= last_line; line_num++) {
-                Gtk.TextIter l_start, l_end;
-                tab_data.buffer.get_iter_at_line (out l_start, line_num);
-                l_end = l_start;
-                if (!l_end.ends_line ()) {
-                    l_end.forward_to_line_end ();
-                }
-
-                bool line_has_tag = l_start.has_tag (tag) || l_start.begins_tag (tag);
-                if (!line_has_tag) {
-                    Gtk.TextIter probe = l_start;
-                    while (probe.compare (l_end) < 0) {
-                        if (probe.has_tag (tag)) {
-                            line_has_tag = true;
-                            break;
-                        }
-                        if (!probe.forward_char ()) {
-                            break;
-                        }
-                    }
-                }
-
-                if (!line_has_tag) {
-                    continue;
-                }
-
-                int y, height;
-                tab_data.view.get_line_yrange (l_start, out y, out height);
-
-                int win_x, win_y;
-                tab_data.view.buffer_to_window_coords (
-                    Gtk.TextWindowType.WIDGET,
-                    0,
-                    y,
-                    out win_x,
-                    out win_y
-                );
-
-                var rect = Graphene.Rect () {
-                    origin = { 0.0f, (float) win_y },
-                    size = { (float) view_width, (float) height }
-                };
-                snapshot.append_color (band_color, rect);
-            }
-
-            return false;
-        });
     }
 
     private void clear_error_highlights_all_tabs () {
@@ -1159,6 +1455,68 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         return result;
     }
 
+    private string get_line_leading_indent (Gtk.TextBuffer buffer, Gtk.TextIter word_start) {
+        Gtk.TextIter line_start;
+        buffer.get_iter_at_line (out line_start, word_start.get_line ());
+        string prefix_before_word = buffer.get_text (line_start, word_start, false);
+
+        var indent_sb = new StringBuilder ();
+        for (int i = 0; i < prefix_before_word.length; i++) {
+            char c = prefix_before_word[i];
+            if (c == ' ' || c == '\t') {
+                indent_sb.append_c (c);
+            } else {
+                break;
+            }
+        }
+        return indent_sb.str;
+    }
+
+    private string get_completed_token_text (string token, string ext, string base_indent) {
+        if (ext == "py") {
+            if (token == "while" || token == "if") {
+                return "%s :\n%s    ".printf (token, base_indent);
+            }
+            if (token == "for") {
+                return "for  in :\n%s    ".printf (base_indent);
+            }
+            if (token == "def") {
+                return "def ():\n%s    ".printf (base_indent);
+            }
+            if (token == "print") {
+                return "print()";
+            }
+            return token;
+        }
+
+        switch (token) {
+            case "while":
+            case "if":
+            case "switch":
+            case "for":
+                return "%s () {\n%s    \n%s}".printf (token, base_indent, base_indent);
+            case "function":
+                return "function () {\n%s    \n%s}".printf (base_indent, base_indent);
+            case "printf":
+            case "println!":
+            case "print":
+            case "scanf":
+            case "console.log":
+            case "System.out.println":
+                return token + "()";
+            default:
+                return token;
+        }
+    }
+
+    private int get_token_cursor_char_offset (string completed_text) {
+        int open_paren = completed_text.index_of ("(");
+        if (open_paren >= 0) {
+            return completed_text.substring (0, open_paren).char_count () + 1;
+        }
+        return completed_text.char_count ();
+    }
+
     private void update_token_suggestions (EditorTabData tab_data) {
         Gtk.TextIter word_start, cursor_iter;
         string prefix = get_word_prefix_at_cursor (tab_data.buffer, out word_start, out cursor_iter);
@@ -1229,12 +1587,22 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         Gtk.TextIter word_start, cursor_iter;
         get_word_prefix_at_cursor (tab_data.buffer, out word_start, out cursor_iter);
         int start_off = word_start.get_offset ();
+        string base_indent = get_line_leading_indent (tab_data.buffer, word_start);
+
+        string ext = get_active_ext ();
+        string completed = get_completed_token_text (token, ext, base_indent);
+        int cursor_offset = start_off + get_token_cursor_char_offset (completed);
 
         tab_data.buffer.begin_user_action ();
         tab_data.buffer.delete (ref word_start, ref cursor_iter);
+
         Gtk.TextIter ins_iter;
         tab_data.buffer.get_iter_at_offset (out ins_iter, start_off);
-        tab_data.buffer.insert (ref ins_iter, token, -1);
+        tab_data.buffer.insert (ref ins_iter, completed, -1);
+
+        Gtk.TextIter target_iter;
+        tab_data.buffer.get_iter_at_offset (out target_iter, cursor_offset);
+        tab_data.buffer.place_cursor (target_iter);
         tab_data.buffer.end_user_action ();
 
         hide_token_popover ();
@@ -1452,12 +1820,13 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             string inner_indent = base_indent + "    ";
 
             string insert_block = "\n" + inner_indent + "\n" + base_indent;
-            int inner_offset = iter.get_offset () + 1 + inner_indent.length;
+            int start_off = iter.get_offset ();
+            int inner_chars = 1 + inner_indent.char_count ();
 
             tab_data.buffer.begin_user_action ();
             tab_data.buffer.insert (ref iter, insert_block, -1);
             Gtk.TextIter target_iter;
-            tab_data.buffer.get_iter_at_offset (out target_iter, inner_offset);
+            tab_data.buffer.get_iter_at_offset (out target_iter, start_off + inner_chars);
             tab_data.buffer.place_cursor (target_iter);
             tab_data.buffer.end_user_action ();
             return true;
@@ -1499,26 +1868,15 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             return false;
         }
 
-        int line_num = word_start.get_line ();
-        Gtk.TextIter line_start;
-        tab_data.buffer.get_iter_at_line (out line_start, line_num);
-        string prefix_before_word = tab_data.buffer.get_text (line_start, word_start, false);
-
-        var indent_sb = new StringBuilder ();
-        for (int i = 0; i < prefix_before_word.length; i++) {
-            char c = prefix_before_word[i];
-            if (c == ' ' || c == '\t') {
-                indent_sb.append_c (c);
-            } else {
-                break;
-            }
-        }
-        string base_indent = indent_sb.str;
+        string base_indent = get_line_leading_indent (tab_data.buffer, word_start);
         string expanded = snippet.replace ("\n", "\n" + base_indent);
 
-        int cursor_rel = expanded.index_of ("$0");
+        int cursor_byte_rel = expanded.index_of ("$0");
         string final_text = expanded.replace ("$0", "");
         int start_off = word_start.get_offset ();
+        int cursor_char_rel = (cursor_byte_rel >= 0)
+            ? expanded.substring (0, cursor_byte_rel).char_count ()
+            : final_text.char_count ();
 
         tab_data.buffer.begin_user_action ();
         tab_data.buffer.delete (ref word_start, ref iter);
@@ -1526,9 +1884,8 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         tab_data.buffer.get_iter_at_offset (out ins_iter, start_off);
         tab_data.buffer.insert (ref ins_iter, final_text, -1);
 
-        int target_off = (cursor_rel >= 0) ? (start_off + cursor_rel) : (start_off + final_text.length);
         Gtk.TextIter cursor_iter;
-        tab_data.buffer.get_iter_at_offset (out cursor_iter, target_off);
+        tab_data.buffer.get_iter_at_offset (out cursor_iter, start_off + cursor_char_rel);
         tab_data.buffer.place_cursor (cursor_iter);
         tab_data.buffer.end_user_action ();
         return true;
@@ -1633,16 +1990,17 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             append_status ("File manager read error: %s".printf (e.message));
         }
 
+        dirs.sort ((a, b) => strcmp (a.down (), b.down ()));
+        files.sort ((a, b) => strcmp (a.down (), b.down ()));
+
         for (int i = 0; i < dirs.length; i++) {
             string name = dirs[i];
-            string full_path = Path.build_filename (current_fm_dir, name);
-            fm_list_box.append (create_fm_row (name, full_path, true));
+            fm_list_box.append (create_fm_row (name, Path.build_filename (current_fm_dir, name), true));
         }
 
         for (int i = 0; i < files.length; i++) {
             string name = files[i];
-            string full_path = Path.build_filename (current_fm_dir, name);
-            fm_list_box.append (create_fm_row (name, full_path, false));
+            fm_list_box.append (create_fm_row (name, Path.build_filename (current_fm_dir, name), false));
         }
 
         last_fm_rendered_dir = current_fm_dir;
@@ -1707,6 +2065,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                 string? p = data.file.get_path ();
                 if (p != null && (p == deleted_path || (is_dir && p.has_prefix (dir_prefix)))) {
                     data.dirty = false;
+                    data.needs_compile = false;
                     detach_token_popover_if_parent (data.view);
                     tab_view.close_page (page);
                 }
@@ -2002,8 +2361,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         ProfileSyncAction refresh_profile_model_and_controls = () => {
             syncing_dialog = true;
             string[] names = build_profile_names_array ();
-            uint current_len = profile_list_model.get_n_items ();
-            profile_list_model.splice (0, current_len, names);
+            profile_list_model.splice (0, profile_list_model.get_n_items (), names);
             syncing_dialog = false;
             sync_controls_only ();
         };
@@ -2127,10 +2485,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
     private EditorTabData? get_tab_data_at (int index, out Adw.TabPage? out_page) {
         out_page = tab_view.get_nth_page (index);
-        if (out_page == null) {
-            return null;
-        }
-        return out_page.get_data<EditorTabData> ("tab-data");
+        return out_page != null ? out_page.get_data<EditorTabData> ("tab-data") : null;
     }
 
     private EditorTabData? get_current_tab_data () {
@@ -2342,7 +2697,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     }
 
     private void schedule_save_session () {
-        if (restoring_session) {
+        if (restoring_session || closing_tab) {
             return;
         }
         if (save_session_timeout_id != 0) {
@@ -2495,6 +2850,8 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             tab_view.set_selected_page (tab_view.get_nth_page (clamped));
             append_status ("Restored %d session file(s).".printf (opened_count));
         }
+
+        sync_all_tab_glows ();
     }
 
     private string get_copyright_holder () {
@@ -2655,7 +3012,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     private Gtk.Box build_file_manager_sidebar () {
         var sidebar = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
         sidebar.add_css_class ("fm-sidebar");
-        sidebar.set_size_request (120, -1);
+        sidebar.set_size_request (160, -1);
         sidebar.set_vexpand (true);
 
         var top_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 4);
@@ -2664,7 +3021,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         top_bar.set_margin_start (8);
         top_bar.set_margin_end (6);
 
-        var fm_title = new Gtk.Label ("FILES");
+        var fm_title = new Gtk.Label ("PROJECT FILES");
         fm_title.add_css_class ("heading");
         fm_title.set_xalign (0.0f);
         fm_title.set_hexpand (true);
@@ -2739,6 +3096,18 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         entry.changed.connect (() => apply_inline_entries ());
         entry.activate.connect (() => run_action (action_mode));
         return entry;
+    }
+
+    private Gtk.ToggleButton create_bottom_tab_button (string label, string target_name) {
+        var btn = new Gtk.ToggleButton.with_label (label);
+        btn.add_css_class ("flat");
+        btn.add_css_class ("bottom-tab-btn");
+        btn.toggled.connect (() => {
+            if (!syncing_bottom_tabs) {
+                select_bottom_tab (target_name);
+            }
+        });
+        return btn;
     }
 
     private void build_ui () {
@@ -2864,25 +3233,31 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         entries_row.append (new Gtk.Label ("Run:"));
         entries_row.append (run_entry);
 
-        main_paned = new Gtk.Paned (Gtk.Orientation.VERTICAL);
+        /* Top-level horizontal paned: Full-height Sidebar on left, Editor+Bottom Dock on right */
+        main_paned = new Gtk.Paned (Gtk.Orientation.HORIZONTAL);
         main_paned.set_vexpand (true);
-        main_paned.set_position ((int) (this.default_height * 0.76));
-        main_box.append (main_paned);
-
-        sidebar_paned = new Gtk.Paned (Gtk.Orientation.HORIZONTAL);
-        sidebar_paned.set_vexpand (true);
-        sidebar_paned.set_hexpand (true);
-        sidebar_paned.set_position ((int) (this.default_width * 0.15));
-        sidebar_paned.notify["position"].connect (() => {
+        main_paned.set_hexpand (true);
+        main_paned.set_position ((int) (this.default_width * 0.20));
+        main_paned.notify["position"].connect (() => {
             if (!syncing_sidebar_position && file_sidebar.get_visible ()) {
                 user_adjusted_sidebar_split = true;
             }
         });
+        main_box.append (main_paned);
 
         file_sidebar = build_file_manager_sidebar ();
-        sidebar_paned.set_start_child (file_sidebar);
-        sidebar_paned.set_resize_start_child (false);
-        sidebar_paned.set_shrink_start_child (false);
+        main_paned.set_start_child (file_sidebar);
+        main_paned.set_resize_start_child (false);
+        main_paned.set_shrink_start_child (false);
+
+        /* Right column vertical paned: Editor on top, Status/Compiler/Terminal underneath */
+        editor_paned = new Gtk.Paned (Gtk.Orientation.VERTICAL);
+        editor_paned.set_vexpand (true);
+        editor_paned.set_hexpand (true);
+        editor_paned.set_position ((int) (this.default_height * 0.78));
+        main_paned.set_end_child (editor_paned);
+        main_paned.set_resize_end_child (true);
+        main_paned.set_shrink_end_child (false);
 
         var editor_area = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
         editor_area.set_vexpand (true);
@@ -2893,27 +3268,26 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         tab_view.set_hexpand (true);
         tab_view.notify["selected-page"].connect (() => {
             hide_token_popover ();
-            if (!restoring_session) {
+            if (!restoring_session && !closing_tab) {
                 refresh_active_tab_state ();
                 sync_file_manager_dir_from_active_tab ();
-                go_to_search_match (false, false, false);
+                sync_all_tab_glows ();
+                if (search_entry != null && search_entry.get_text () != "") {
+                    go_to_search_match (false, false, false);
+                } else {
+                    set_search_no_match (false);
+                }
                 schedule_save_session ();
             }
         });
         tab_view.close_page.connect ((page) => {
             var data = page.get_data<EditorTabData> ("tab-data");
-            if (data != null) {
-                detach_token_popover_if_parent (data.view);
-                if (data.dirty && data.file != null) {
-                    write_tab_to_disk (page, data, false);
-                }
+            if (data != null && data.dirty) {
+                prompt_close_dirty_page (page, data);
+                return true;
             }
-            tab_view.close_page_finish (page, true);
-            if (tab_view.get_n_pages () == 0) {
-                create_new_tab (null, "Untitled", "");
-            }
-            schedule_save_session ();
-            return Gdk.EVENT_STOP;
+            finalize_tab_close (page, data);
+            return true;
         });
 
         tab_bar = new Adw.TabBar ();
@@ -2922,56 +3296,33 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
         editor_area.append (tab_bar);
         editor_area.append (tab_view);
-        sidebar_paned.set_end_child (editor_area);
-        sidebar_paned.set_resize_end_child (true);
-        sidebar_paned.set_shrink_end_child (false);
-
-        main_paned.set_start_child (sidebar_paned);
+        editor_paned.set_start_child (editor_area);
+        editor_paned.set_resize_start_child (true);
+        editor_paned.set_shrink_start_child (false);
 
         Adw.StyleManager.get_default ().notify["dark"].connect (() => {
             if (get_active_profile ().style_scheme == "auto") {
-                refresh_cached_style_scheme ();
-                sync_all_style_schemes ();
+                apply_active_profile_now ();
             }
         });
 
-        var bottom_dock = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
+        /* Right-hand bottom dock: horizontal tab strip above stack view */
+        var bottom_dock = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
+        bottom_dock.set_size_request (-1, 110);
         bottom_dock.set_vexpand (true);
         bottom_dock.set_hexpand (true);
 
-        var side_tabs_bar = new Gtk.Box (Gtk.Orientation.VERTICAL, 2);
-        side_tabs_bar.set_margin_top (6);
-        side_tabs_bar.set_margin_bottom (6);
-        side_tabs_bar.set_margin_start (6);
-        side_tabs_bar.set_margin_end (6);
+        var top_tabs_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 4);
+        top_tabs_bar.add_css_class ("bottom-tab-strip");
+        top_tabs_bar.set_hexpand (true);
 
-        status_tab_btn = new Gtk.ToggleButton.with_label ("Status");
-        status_tab_btn.add_css_class ("flat");
-        status_tab_btn.toggled.connect (() => {
-            if (!syncing_bottom_tabs) {
-                select_bottom_tab ("status");
-            }
-        });
+        status_tab_btn = create_bottom_tab_button ("Status", "status");
+        compiler_tab_btn = create_bottom_tab_button ("Compiler", "compiler");
+        terminal_tab_btn = create_bottom_tab_button ("Terminal (VTE)", "terminal");
 
-        compiler_tab_btn = new Gtk.ToggleButton.with_label ("Compiler");
-        compiler_tab_btn.add_css_class ("flat");
-        compiler_tab_btn.toggled.connect (() => {
-            if (!syncing_bottom_tabs) {
-                select_bottom_tab ("compiler");
-            }
-        });
-
-        terminal_tab_btn = new Gtk.ToggleButton.with_label ("Terminal");
-        terminal_tab_btn.add_css_class ("flat");
-        terminal_tab_btn.toggled.connect (() => {
-            if (!syncing_bottom_tabs) {
-                select_bottom_tab ("terminal");
-            }
-        });
-
-        side_tabs_bar.append (status_tab_btn);
-        side_tabs_bar.append (compiler_tab_btn);
-        side_tabs_bar.append (terminal_tab_btn);
+        top_tabs_bar.append (status_tab_btn);
+        top_tabs_bar.append (compiler_tab_btn);
+        top_tabs_bar.append (terminal_tab_btn);
 
         bottom_stack = new Gtk.Stack ();
         bottom_stack.set_vexpand (true);
@@ -2993,10 +3344,11 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         term_scroll.set_child (terminal);
         bottom_stack.add_named (term_scroll, "terminal");
 
-        bottom_dock.append (side_tabs_bar);
-        bottom_dock.append (new Gtk.Separator (Gtk.Orientation.VERTICAL));
+        bottom_dock.append (top_tabs_bar);
         bottom_dock.append (bottom_stack);
-        main_paned.set_end_child (bottom_dock);
+        editor_paned.set_end_child (bottom_dock);
+        editor_paned.set_resize_end_child (false);
+        editor_paned.set_shrink_end_child (false);
 
         select_bottom_tab ("status");
     }
@@ -3137,10 +3489,10 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                     sync_file_manager_dir_from_active_tab ();
                     save_session_now ();
 
-                    string saved_msg = "file saved to %s".printf (full_path);
+                    string saved_msg = "saved successfully (%s)".printf (full_path);
                     append_status (saved_msg);
                     select_bottom_tab ("status");
-                    show_status_dialog ("File Created & Saved", saved_msg);
+                    show_status_dialog ("Saved", "saved successfully\n\n%s".printf (full_path));
                 } catch (Error e) {
                     syncing_title = false;
                     if (!(e is Gtk.DialogError.DISMISSED)) {
@@ -3163,7 +3515,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         }
         buffer.set_language (lang_mgr.guess_language (tab_title, null));
 
-        var view = new GtkSource.View.with_buffer (buffer);
+        var view = new ErrorLineSourceView.with_buffer (buffer);
         view.add_css_class ("rookie-editor");
         view.show_line_numbers = prof.show_line_numbers;
         view.auto_indent = true;
@@ -3178,7 +3530,6 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
         var tab_data = new EditorTabData (file, buffer, view);
         attach_autoclose_and_autofill (tab_data);
-        attach_full_line_error_painter (tab_data);
 
         var page = tab_view.append (scroll);
         page.set_title (tab_title);
@@ -3196,7 +3547,16 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             tab_data.dirty = true;
             string base_title = page.get_title ();
             if (!base_title.has_prefix ("*")) {
+                syncing_title = true;
                 page.set_title ("*" + base_title);
+                syncing_title = false;
+            }
+            set_tab_uncompiled_glow (page, tab_data, true);
+        });
+
+        page.notify["title"].connect (() => {
+            if (!syncing_title) {
+                sync_all_tab_glows ();
             }
         });
 
@@ -3234,21 +3594,15 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             bool is_dark = Adw.StyleManager.get_default ().dark;
             scheme = scheme_mgr.get_scheme (is_dark ? "Adwaita-dark" : "Adwaita");
         }
-        cached_scheme = scheme;
-    }
-
-    private void sync_all_style_schemes () {
-        if (cached_scheme == null) {
-            return;
-        }
-        int n = tab_view.get_n_pages ();
-        for (int i = 0; i < n; i++) {
-            Adw.TabPage? _p;
-            var data = get_tab_data_at (i, out _p);
-            if (data != null && data.buffer.get_style_scheme () != cached_scheme) {
-                data.buffer.set_style_scheme (cached_scheme);
+        if (scheme == null) {
+            foreach (string id in scheme_mgr.get_scheme_ids ()) {
+                scheme = scheme_mgr.get_scheme (id);
+                if (scheme != null) {
+                    break;
+                }
             }
         }
+        cached_scheme = scheme;
     }
 
     private void add_shortcut_action (Gtk.ShortcutController ctrl, string accel, owned Gtk.ShortcutFunc cb) {
@@ -3259,19 +3613,39 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     }
 
     private void setup_shortcuts () {
+        var widget_self = (Gtk.Widget) this;
         var controller = new Gtk.ShortcutController ();
         controller.set_scope (Gtk.ShortcutScope.MANAGED);
 
         add_shortcut_action (controller, "<Control>n", (w, _args) => { open_new_file_dialog (); return true; });
         add_shortcut_action (controller, "<Control>o", (w, _args) => { on_open_clicked (); return true; });
         add_shortcut_action (controller, "<Control>s", (w, _args) => { save_current_tab (true); return true; });
+        add_shortcut_action (controller, "<Control>w", (w, _args) => {
+            var page = tab_view.get_selected_page ();
+            if (page != null) {
+                tab_view.close_page (page);
+            }
+            return true;
+        });
         add_shortcut_action (controller, "<Control>f", (w, _args) => { search_entry.grab_focus (); return true; });
         add_shortcut_action (controller, "<Control>comma", (w, _args) => { open_theme_profiles_dialog (); return true; });
         add_shortcut_action (controller, "F8", (w, _args) => { run_action ("compile"); return true; });
         add_shortcut_action (controller, "F9", (w, _args) => { run_action ("make"); return true; });
         add_shortcut_action (controller, "F5", (w, _args) => { run_action ("run"); return true; });
 
-        this.add_controller (controller);
+        widget_self.add_controller (controller);
+
+        var save_guard = new Gtk.EventControllerKey ();
+        save_guard.set_propagation_phase (Gtk.PropagationPhase.CAPTURE);
+        save_guard.key_pressed.connect ((keyval, _keycode, state) => {
+            var ctrl_only = state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.SHIFT_MASK);
+            if (ctrl_only == Gdk.ModifierType.CONTROL_MASK && (keyval == Gdk.Key.s || keyval == Gdk.Key.S)) {
+                save_current_tab (true);
+                return true;
+            }
+            return false;
+        });
+        widget_self.add_controller (save_guard);
     }
 
     private string get_active_ext () {
@@ -3432,19 +3806,20 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
         refresh_active_tab_state ();
         refresh_file_manager (true);
+        sync_all_tab_glows ();
         schedule_save_session ();
 
-        string saved_msg = "file saved to %s".printf (full_path);
+        string saved_msg = "saved successfully (%s)".printf (full_path);
         append_status (saved_msg);
 
         if (notify_saved) {
             select_bottom_tab ("status");
-            show_status_dialog ("File Saved", saved_msg);
+            show_status_dialog ("Saved", "saved successfully\n\n%s".printf (full_path));
         }
         return true;
     }
 
-    private void run_compiler_subprocess (string action_label, string dir, string command_line) {
+    private void run_compiler_subprocess (string action_label, string dir, string target_filename, string command_line) {
         string[] argv = { "/bin/sh", "-c", command_line };
         select_bottom_tab ("compiler");
         append_compiler ("--- %s (%s) ---".printf (action_label, dir), false);
@@ -3487,6 +3862,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
                     }
 
                     if (ok) {
+                        clear_uncompiled_glow_for_target (dir, target_filename);
                         string heading = (action_label == "Compile")
                             ? "Compiled successfully"
                             : "%s Completed".printf (action_label);
@@ -3563,7 +3939,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
         if (mode == "compile" || mode == "make") {
             string label = (mode == "compile") ? "Compile" : "Make";
-            run_compiler_subprocess (label, dir, expanded);
+            run_compiler_subprocess (label, dir, filename, expanded);
         } else {
             select_bottom_tab ("terminal");
             append_status ("Running %s in %s".printf (filename, dir));
