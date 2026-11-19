@@ -24,3 +24,29 @@
 meson setup _build
 ninja -C _build
 ./_build/src/rookieide
+```
+
+## 🚀 Installation
+
+### 1. Clone the Repository
+Clone the project from GitHub and enter the project directory:
+
+```bash
+git clone [https://github.com/rizzyED/RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor.git](https://github.com/rizzyED/RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor.git)
+cd RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor
+```
+### 2. Configure and Build with Meson
+Set up a build directory (_build) and compile the project using ninja:
+```bash
+meson setup _build
+ninja -C _build
+```
+### 3. Run or Install System-Wide
+Run directly from the build directory to test:
+```bash
+./_build/src/rookieide
+```
+Or install it onto your system:
+```bash
+sudo ninja -C _build install
+```
