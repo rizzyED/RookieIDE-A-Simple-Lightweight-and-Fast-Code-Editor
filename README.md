@@ -32,7 +32,7 @@ ninja -C _build
 Clone the project from GitHub and enter the project directory:
 
 ```bash
-git clone [https://github.com/rizzyED/RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor.git](https://github.com/rizzyED/RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor.git)
+git clone https://github.com/rizzyED/RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor.git
 cd RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor
 ```
 
