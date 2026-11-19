@@ -53,3 +53,11 @@ Or install it onto your system:
 sudo ninja -C _build install
 ```
 ### Also available in AppImage. Windows Platform port? maybe next month lol
+
+### Pre-Built AppImage (Linux)
+Download the latest `RookieIDE-x86_64.AppImage` from the [GitHub Releases](https://github.com/rizzyED/RookieIDE-A-Simple-Lightweight-and-Fast-Code-Editor/releases) page, mark it executable, and run it:
+
+```bash
+chmod +x RookieIDE-x86_64.AppImage
+./RookieIDE-x86_64.AppImage
+```
