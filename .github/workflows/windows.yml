@@ -19,6 +19,7 @@ jobs:
           msystem: UCRT64
           update: true
           install: >-
+            mingw-w64-ucrt-x86_64-vte4
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-meson
             mingw-w64-ucrt-x86_64-ninja
@@ -26,6 +27,7 @@ jobs:
             mingw-w64-ucrt-x86_64-libadwaita
             mingw-w64-ucrt-x86_64-adwaita-icon-theme
             mingw-w64-ucrt-x86_64-vala
+            ingw-w64-ucrt-x86_64-gtksourceview5
 
       - name: Configure and Build
         run: |
