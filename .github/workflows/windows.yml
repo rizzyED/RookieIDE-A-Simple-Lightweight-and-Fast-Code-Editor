@@ -25,6 +25,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gtk4
             mingw-w64-ucrt-x86_64-libadwaita
             mingw-w64-ucrt-x86_64-adwaita-icon-theme
+            mingw-w64-ucrt-x86_64-vala
 
       - name: Configure and Build
         run: |
