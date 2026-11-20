@@ -20,7 +20,9 @@
 using Gtk;
 using Adw;
 using GtkSource;
+#if HAVE_VTE
 using Vte;
+#endif
 using Graphene;
 
 private delegate void ProfileSyncAction ();
@@ -256,7 +258,9 @@ private class ErrorLineSourceView : GtkSource.View {
 public class RookieIdeWindow : Adw.ApplicationWindow {
     private Adw.TabView tab_view;
     private Adw.TabBar tab_bar;
+#if HAVE_VTE
     private Vte.Terminal terminal;
+#endif
     private Adw.WindowTitle title_widget;
 
     private Gtk.Paned main_paned;
@@ -279,7 +283,9 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     private Gtk.Stack bottom_stack;
     private Gtk.ToggleButton status_tab_btn;
     private Gtk.ToggleButton compiler_tab_btn;
+#if HAVE_VTE
     private Gtk.ToggleButton terminal_tab_btn;
+#endif
     private bool syncing_bottom_tabs = false;
 
     private Gtk.TextView status_view;
@@ -399,7 +405,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         scheme_mgr = GtkSource.StyleSchemeManager.get_default ();
         saved_labels_by_key = new HashTable<string, GenericArray<LineLabelEntry>> (str_hash, str_equal);
 
-        string home = Environment.get_home_dir () ?? "/tmp";
+        string home = Environment.get_home_dir () ?? Environment.get_tmp_dir ();
         current_fm_dir = home;
         string config_dir = Path.build_filename (home, ".config", "rookie-ide");
         config_path = Path.build_filename (config_dir, "commands.conf");
@@ -424,7 +430,9 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         tab_bar.set_view (tab_view);
         refresh_active_tab_state ();
         sync_file_manager_dir_from_active_tab ();
+#if HAVE_VTE
         start_shell ();
+#endif
 
         this.map.connect (() => {
             Idle.add (() => {
@@ -1816,10 +1824,13 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             }
         }
 
+#if HAVE_VTE
         apply_terminal_profile (prof);
+#endif
         sync_all_tab_glows ();
     }
 
+#if HAVE_VTE
     private Gdk.RGBA parse_rgba (string hex) {
         var c = Gdk.RGBA ();
         c.parse (hex);
@@ -1968,6 +1979,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
         terminal.set_colors (fg, bg, palette);
     }
+#endif
 
     private string[] build_profile_names_array () {
         string[] names = new string[profile_order.length];
@@ -3109,7 +3121,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         }
 
         if (!FileUtils.test (current_fm_dir, FileTest.IS_DIR)) {
-            current_fm_dir = Environment.get_home_dir () ?? "/";
+            current_fm_dir = Environment.get_home_dir () ?? Environment.get_tmp_dir ();
         }
 
         if (!force && last_fm_rendered_dir == current_fm_dir && fm_list_box.get_first_child () != null) {
@@ -3121,7 +3133,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             ? ("~" + current_fm_dir.substring (home.length))
             : current_fm_dir;
         if (display_dir == "") {
-            display_dir = "/";
+            display_dir = Path.DIR_SEPARATOR_S;
         }
         fm_dir_label.set_label (display_dir);
         fm_dir_label.set_tooltip_text (current_fm_dir);
@@ -3218,7 +3230,9 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     }
 
     private void close_tabs_for_deleted_path (string deleted_path, bool is_dir) {
-        string dir_prefix = deleted_path.has_suffix ("/") ? deleted_path : (deleted_path + "/");
+        string dir_prefix = (deleted_path.has_suffix ("/") || deleted_path.has_suffix ("\\"))
+            ? deleted_path
+            : (deleted_path + Path.DIR_SEPARATOR_S);
         for (int i = tab_view.get_n_pages () - 1; i >= 0; i--) {
             Adw.TabPage? page;
             var data = get_tab_data_at (i, out page);
@@ -3450,6 +3464,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
     }
 
     private void load_default_commands () {
+#if HAVE_VTE
         set_cmd ("global", "make", "make");
         set_cmd ("c", "compile", "gcc -O2 -Wall -Wextra \"%f\" -o \"%e\"");
         set_cmd ("c", "run", "gcc -O2 -Wall -Wextra \"%f\" -o \"%e\" && ./\"%e\"");
@@ -3467,6 +3482,25 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         set_cmd ("htm", "run", "xdg-open \"%f\" >/dev/null 2>&1 &");
         set_cmd ("css", "compile", "echo \"CSS has no compile step.\"");
         set_cmd ("css", "run", "echo \"Link %f in an HTML file to preview.\"");
+#else
+        set_cmd ("global", "make", "mingw32-make");
+        set_cmd ("c", "compile", "gcc -O2 -Wall -Wextra \"%f\" -o \"%e.exe\"");
+        set_cmd ("c", "run", "gcc -O2 -Wall -Wextra \"%f\" -o \"%e.exe\" && \"%e.exe\"");
+        set_cmd ("java", "compile", "javac \"%f\"");
+        set_cmd ("java", "run", "javac \"%f\" && java \"%e\"");
+        set_cmd ("js", "compile", "node --check \"%f\"");
+        set_cmd ("js", "run", "node \"%f\"");
+        set_cmd ("py", "compile", "python -m py_compile \"%f\"");
+        set_cmd ("py", "run", "python \"%f\"");
+        set_cmd ("rs", "compile", "rustc -O \"%f\" -o \"%e.exe\"");
+        set_cmd ("rs", "run", "rustc -O \"%f\" -o \"%e.exe\" && \"%e.exe\"");
+        set_cmd ("html", "compile", "echo HTML has no compile step.");
+        set_cmd ("html", "run", "start \"\" \"%f\"");
+        set_cmd ("htm", "compile", "echo HTML has no compile step.");
+        set_cmd ("htm", "run", "start \"\" \"%f\"");
+        set_cmd ("css", "compile", "echo CSS has no compile step.");
+        set_cmd ("css", "run", "echo Link %f in an HTML file to preview.");
+#endif
     }
 
     private void load_user_commands () {
@@ -3723,11 +3757,21 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         if (bottom_stack == null) {
             return;
         }
+#if !HAVE_VTE
+        if (name == "terminal") {
+            name = "compiler";
+        }
+#endif
         bottom_stack.set_visible_child_name (name);
 
         syncing_bottom_tabs = true;
+#if HAVE_VTE
         Gtk.ToggleButton?[] buttons = { status_tab_btn, compiler_tab_btn, terminal_tab_btn };
         string?[] names = { "status", "compiler", "terminal" };
+#else
+        Gtk.ToggleButton?[] buttons = { status_tab_btn, compiler_tab_btn };
+        string?[] names = { "status", "compiler" };
+#endif
 
         for (int i = 0; i < buttons.length; i++) {
             bool active = (name == names[i]);
@@ -3856,7 +3900,11 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         active_lang_label.set_label ("Target: ." + ext);
         compile_entry.set_text (get_cmd (ext, "compile") ?? "");
         run_entry.set_text (get_cmd (ext, "run") ?? "");
+#if HAVE_VTE
         make_entry.set_text (get_cmd ("global", "make") ?? "make");
+#else
+        make_entry.set_text (get_cmd ("global", "make") ?? "mingw32-make");
+#endif
         syncing_entries = false;
     }
 
@@ -3868,12 +3916,18 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         set_cmd (ext, "compile", compile_entry.get_text ());
         set_cmd (ext, "run", run_entry.get_text ());
 
+#if HAVE_VTE
+        string default_make = "make";
+#else
+        string default_make = "mingw32-make";
+#endif
         string make_val = make_entry.get_text ().strip ();
-        set_cmd ("global", "make", make_val != "" ? make_val : "make");
+        set_cmd ("global", "make", make_val != "" ? make_val : default_make);
 
         schedule_save_commands ();
     }
 
+#if HAVE_VTE
     private void start_shell () {
         string home = Environment.get_home_dir () ?? "/";
         string[] argv = { "/bin/bash" };
@@ -3890,9 +3944,14 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             null
         );
     }
+#endif
 
     private void run_compiler_subprocess (string action_label, string dir, string target_filename, string command_line) {
+#if HAVE_VTE
         string[] argv = { "/bin/sh", "-c", command_line };
+#else
+        string[] argv = { "cmd.exe", "/C", command_line };
+#endif
         select_bottom_tab ("compiler");
         append_compiler ("--- %s (%s) ---".printf (action_label, dir), false);
         append_compiler ("$ %s".printf (command_line), false);
@@ -3993,8 +4052,13 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         string ext = get_extension (filename).down ();
         string stem = strip_extension (filename);
 
+#if HAVE_VTE
+        string default_make = "make";
+#else
+        string default_make = "mingw32-make";
+#endif
         string? template_cmd = (mode == "make")
-            ? (get_cmd ("global", "make") ?? "make")
+            ? (get_cmd ("global", "make") ?? default_make)
             : get_cmd (ext, mode);
 
         if (template_cmd == null || template_cmd.strip () == "") {
@@ -4009,6 +4073,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             .replace ("%e", stem)
             .replace ("%d", dir);
 
+#if HAVE_VTE
         if (mode == "compile" || mode == "make") {
             string label = (mode == "compile") ? "Compile" : "Make";
             run_compiler_subprocess (label, dir, filename, expanded);
@@ -4017,6 +4082,10 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
             append_status ("Running %s in %s".printf (filename, dir));
             terminal.feed_child (("cd %s && %s\n".printf (shell_escape (dir), expanded)).data);
         }
+#else
+        string label = (mode == "compile") ? "Compile" : ((mode == "make") ? "Make" : "Run");
+        run_compiler_subprocess (label, dir, filename, expanded);
+#endif
     }
 
     private string get_extension (string filename) {
@@ -4032,9 +4101,11 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         return dot <= 0 ? filename : filename.substring (0, dot);
     }
 
+#if HAVE_VTE
     private string shell_escape (string s) {
         return "'" + s.replace ("'", "'\\''") + "'";
     }
+#endif
 
     /* =========================================================================
      * 10. UI Layout, New File Dialog & Shortcuts
@@ -4480,11 +4551,14 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
 
         status_tab_btn = create_bottom_tab_button ("Status", "status");
         compiler_tab_btn = create_bottom_tab_button ("Compiler", "compiler");
-        terminal_tab_btn = create_bottom_tab_button ("Terminal (VTE)", "terminal");
 
         top_tabs_bar.append (status_tab_btn);
         top_tabs_bar.append (compiler_tab_btn);
+
+#if HAVE_VTE
+        terminal_tab_btn = create_bottom_tab_button ("Terminal (VTE)", "terminal");
         top_tabs_bar.append (terminal_tab_btn);
+#endif
 
         bottom_stack = new Gtk.Stack ();
         bottom_stack.set_vexpand (true);
@@ -4497,6 +4571,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         ensure_compiler_error_tag ();
         bottom_stack.add_named (build_log_page (compiler_buffer, out compiler_view), "compiler");
 
+#if HAVE_VTE
         terminal = new Vte.Terminal ();
         terminal.set_vexpand (true);
         terminal.set_hexpand (true);
@@ -4505,6 +4580,7 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
         term_scroll.set_hexpand (true);
         term_scroll.set_child (terminal);
         bottom_stack.add_named (term_scroll, "terminal");
+#endif
 
         bottom_dock.append (top_tabs_bar);
         bottom_dock.append (bottom_stack);
@@ -4737,8 +4813,16 @@ public class RookieIdeApp : Adw.Application {
         var display = Gdk.Display.get_default ();
         if (display != null) {
             var icon_theme = Gtk.IconTheme.get_for_display (display);
+#if HAVE_VTE
             icon_theme.add_search_path ("/usr/local/share/icons");
             icon_theme.add_search_path ("data/icons");
+#else
+            string? exe_dir = Environment.get_variable ("MSYSTEM_PREFIX");
+            if (exe_dir != null && exe_dir != "") {
+                icon_theme.add_search_path (Path.build_filename (exe_dir, "share", "icons"));
+            }
+            icon_theme.add_search_path ("data/icons");
+#endif
         }
         new RookieIdeWindow (this).present ();
     }
