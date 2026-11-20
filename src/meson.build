@@ -15,6 +15,10 @@ if vte_dep.found()
   rookieide_deps += [vte_dep]
 endif
 
+if host_machine.system() == 'windows'
+  vala_args += ['-D', 'WINDOWS']
+endif
+
 executable('rookieide', rookieide_sources,
   vala_args: vala_args,
   dependencies: rookieide_deps,
