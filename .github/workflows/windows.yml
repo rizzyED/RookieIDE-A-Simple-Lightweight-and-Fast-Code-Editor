@@ -27,6 +27,9 @@ jobs:
             mingw-w64-ucrt-x86_64-adwaita-icon-theme
             mingw-w64-ucrt-x86_64-vala
             mingw-w64-ucrt-x86_64-gtksourceview5
+            mingw-w64-ucrt-x86_64-ttf-dejavu
+            mingw-w64-ucrt-x86_64-cantarell-fonts
+            mingw-w64-ucrt-x86_64-fontconfig
 
       - name: Configure and Build
         run: |
@@ -44,6 +47,16 @@ jobs:
           glib-compile-schemas dist/share/glib-2.0/schemas
           cp -r /ucrt64/share/icons/Adwaita dist/share/icons/
           cp -r /ucrt64/share/icons/hicolor dist/share/icons/
+          # GtkSourceView language specs + style schemes (syntax highlighting)
+          mkdir -p dist/share/gtksourceview-5
+          cp -r /ucrt64/share/gtksourceview-5/* dist/share/gtksourceview-5/
+          # Fonts + fontconfig so the UI/editor fonts match Linux
+          mkdir -p dist/share/fonts dist/etc
+          cp -r /ucrt64/share/fonts/* dist/share/fonts/ || true
+          cp -r /ucrt64/etc/fonts dist/etc/
+          # Compile settings / mime data GTK looks up at runtime
+          mkdir -p dist/share/mime
+          cp -r /ucrt64/share/mime/* dist/share/mime/ || true
 
       - name: Upload Windows Bundle
         uses: actions/upload-artifact@v4
