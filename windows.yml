@@ -1,0 +1,50 @@
+name: Build Windows Standalone
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme
+
+      - name: Configure and Build
+        run: |
+          meson setup builddir --prefix=$PWD/dist
+          ninja -C builddir install
+
+      - name: Bundle Runtime DLLs & Schemas
+        run: |
+          # Copy required UCRT64 DLLs next to the executable
+          ldd dist/bin/*.exe | grep '/ucrt64/bin/' | awk '{print $3}' | xargs -I{} cp -u {} dist/bin/
+          # Copy GDK-Pixbuf loaders & GLib schemas
+          mkdir -p dist/lib dist/share/glib-2.0/schemas dist/share/icons
+          cp -r /ucrt64/lib/gdk-pixbuf-2.0 dist/lib/
+          cp -r /ucrt64/share/glib-2.0/schemas/* dist/share/glib-2.0/schemas/
+          glib-compile-schemas dist/share/glib-2.0/schemas
+          cp -r /ucrt64/share/icons/Adwaita dist/share/icons/
+          cp -r /ucrt64/share/icons/hicolor dist/share/icons/
+
+      - name: Upload Windows Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: RookieIDE-Windows
+          path: dist/
