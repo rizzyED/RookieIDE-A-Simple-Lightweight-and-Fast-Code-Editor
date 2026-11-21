@@ -23,4 +23,6 @@ executable('rookieide', rookieide_sources,
   vala_args: vala_args,
   dependencies: rookieide_deps,
   install: true,
+  # On Windows, build as a GUI program so no console window opens with it.
+  win_subsystem: 'windows',
 )
