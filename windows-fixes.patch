@@ -1,0 +1,154 @@
+From 938239aa52163e9901d56f8a55dc2718999cd90b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 21 Nov 2026 01:23:49 +0800
+Subject: [PATCH 1/2] Make the Windows build look like the Linux one
+
+- Define WINDOWS in meson for Windows hosts
+- Map the "Monospace" editor font to real fonts on Windows
+- Set the UI font and text rendering to match GNOME
+- Bundle GtkSourceView data, fonts and fontconfig in the Windows workflow
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01WvnPpMHLf8M3jQNDHfWfko
+---
+ .github/workflows/windows.yml | 13 +++++++++++++
+ src/main.vala                 | 35 ++++++++++++++++++++++++++++++++---
+ src/meson.build               |  4 ++++
+ 3 files changed, 49 insertions(+), 3 deletions(-)
+
+diff --git a/.github/workflows/windows.yml b/.github/workflows/windows.yml
+index 3491b24..7800cd7 100644
+--- a/.github/workflows/windows.yml
++++ b/.github/workflows/windows.yml
+@@ -27,6 +27,9 @@ jobs:
+             mingw-w64-ucrt-x86_64-adwaita-icon-theme
+             mingw-w64-ucrt-x86_64-vala
+             mingw-w64-ucrt-x86_64-gtksourceview5
++            mingw-w64-ucrt-x86_64-ttf-dejavu
++            mingw-w64-ucrt-x86_64-cantarell-fonts
++            mingw-w64-ucrt-x86_64-fontconfig
+ 
+       - name: Configure and Build
+         run: |
+@@ -44,6 +47,16 @@ jobs:
+           glib-compile-schemas dist/share/glib-2.0/schemas
+           cp -r /ucrt64/share/icons/Adwaita dist/share/icons/
+           cp -r /ucrt64/share/icons/hicolor dist/share/icons/
++          # GtkSourceView language specs + style schemes (syntax highlighting)
++          mkdir -p dist/share/gtksourceview-5
++          cp -r /ucrt64/share/gtksourceview-5/* dist/share/gtksourceview-5/
++          # Fonts + fontconfig so the UI/editor fonts match Linux
++          mkdir -p dist/share/fonts dist/etc
++          cp -r /ucrt64/share/fonts/* dist/share/fonts/ || true
++          cp -r /ucrt64/etc/fonts dist/etc/
++          # Compile settings / mime data GTK looks up at runtime
++          mkdir -p dist/share/mime
++          cp -r /ucrt64/share/mime/* dist/share/mime/ || true
+ 
+       - name: Upload Windows Bundle
+         uses: actions/upload-artifact@v4
+diff --git a/src/main.vala b/src/main.vala
+index f47491e..3a1d433 100644
+--- a/src/main.vala
++++ b/src/main.vala
+@@ -1374,12 +1374,42 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
+         uint priority
+     );
+ 
++    /* Windows has no "Monospace" alias (it falls back to serif Courier New),
++     * so map it to the closest equivalents of what Linux desktops provide. */
++    private string build_editor_font_stack (string family) {
++        string escaped = family.replace ("\"", "\\\"");
++#if WINDOWS
++        string lower = family.down ();
++        if (lower == "monospace" || lower == "mono" || lower == "") {
++            return "\"Adwaita Mono\", \"DejaVu Sans Mono\", \"Cascadia Mono\", Consolas, \"Lucida Console\", monospace";
++        }
++        return "\"%s\", \"Cascadia Mono\", Consolas, monospace".printf (escaped);
++#else
++        return "\"%s\", monospace".printf (escaped);
++#endif
++    }
++
++    /* Make the UI font and rendering match the Linux/GNOME look on Windows. */
++    private void apply_platform_ui_tweaks () {
++#if WINDOWS
++        var settings = Gtk.Settings.get_default ();
++        if (settings != null) {
++            settings.gtk_font_name = "Adwaita Sans, Cantarell, Segoe UI Variable Text, Segoe UI 11";
++            settings.gtk_xft_antialias = 1;
++            settings.gtk_xft_hinting = 0;
++            settings.gtk_xft_rgba = "none";
++        }
++#endif
++    }
++
+     private void install_ui_css () {
+         var display = Gdk.Display.get_default ();
+         if (display == null) {
+             return;
+         }
+ 
++        apply_platform_ui_tweaks ();
++
+         var provider = new Gtk.CssProvider ();
+         provider.load_from_string ("""
+             entry.search-no-match,
+@@ -1797,9 +1827,8 @@ public class RookieIdeWindow : Adw.ApplicationWindow {
+             if (size_pts <= 0) {
+                 size_pts = 11;
+             }
+-            string escaped_family = family.replace ("\"", "\\\"");
+-            string css = "textview.rookie-editor { font-family: \"%s\", monospace; font-size: %dpt; }".printf (
+-                escaped_family,
++            string css = "textview.rookie-editor { font-family: %s; font-size: %dpt; }".printf (
++                build_editor_font_stack (family),
+                 size_pts
+             );
+             if (last_editor_font_css != css) {
+diff --git a/src/meson.build b/src/meson.build
+index 74ed391..96a1adb 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -15,6 +15,10 @@ if vte_dep.found()
+   rookieide_deps += [vte_dep]
+ endif
+ 
++if host_machine.system() == 'windows'
++  vala_args += ['-D', 'WINDOWS']
++endif
++
+ executable('rookieide', rookieide_sources,
+   vala_args: vala_args,
+   dependencies: rookieide_deps,
+-- 
+2.43.0
+
+
+From 695e352615c89431519eb06a6ffbce3605cfb2ad Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 21 Nov 2026 01:44:16 +0800
+Subject: [PATCH 2/2] Build the Windows executable as a GUI program (no console
+ window)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01WvnPpMHLf8M3jQNDHfWfko
+---
+ src/meson.build | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/meson.build b/src/meson.build
+index 96a1adb..1d45ff9 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -23,4 +23,6 @@ executable('rookieide', rookieide_sources,
+   vala_args: vala_args,
+   dependencies: rookieide_deps,
+   install: true,
++  # On Windows, build as a GUI program so no console window opens with it.
++  win_subsystem: 'windows',
+ )
+\ No newline at end of file
+-- 
+2.43.0
+
